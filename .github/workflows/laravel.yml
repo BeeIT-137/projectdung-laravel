@@ -25,15 +25,32 @@ jobs:
       - name: Check PHP & Composer
         run: |
           php -v
+          php -m
           composer -V
+          composer diagnose || true
 
       - name: Copy .env
         run: php -r "file_exists('.env') || copy('.env.example', '.env');"
 
-      - name: Composer install (DEBUG)
+      # Cache composer để chạy nhanh hơn
+      - name: Get Composer cache dir
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-
+
+      # BỎ -q để thấy lỗi thật, dùng -vvv để debug
+      - name: Install Dependencies (DEBUG)
         env:
           COMPOSER_ALLOW_SUPERUSER: 1
-        run: composer install --no-interaction --prefer-dist -vvv
+        run: |
+          composer install --no-interaction --prefer-dist --no-progress -vvv
 
       - name: Generate key
         run: php artisan key:generate
@@ -41,8 +58,6 @@ jobs:
       - name: Directory Permissions
         run: chmod -R 777 storage bootstrap/cache
 
-
-      # (Tuỳ chọn) Nếu bạn vẫn muốn chạy test SQLite như file của bạn:
       - name: Create SQLite Database
         run: |
           mkdir -p database
@@ -54,6 +69,7 @@ jobs:
           DB_DATABASE: database/database.sqlite
         run: php artisan test
 
+
   ftp-deploy:
     needs: laravel-tests
     runs-on: ubuntu-latest
@@ -61,6 +77,45 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # Nếu repo KHÔNG commit vendor/ thì cần composer install để có vendor trước khi deploy
+      - name: Setup PHP (for deploy build)
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          tools: composer:v2
+          extensions: mbstring, xml, ctype, json, bcmath, tokenizer, curl, zip, gd
+          ini-values: memory_limit=1G
+
+      - name: Get Composer cache dir
+        id: composer-cache-deploy
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache-deploy.outputs.dir }}
+          key: ${{ runner.os }}-composer-deploy-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-deploy-
+            ${{ runner.os }}-composer-
+
+      - name: Copy .env (for build only)
+        run: php -r "file_exists('.env') || copy('.env.example', '.env');"
+
+      - name: Install Dependencies (no-dev)
+        env:
+          COMPOSER_ALLOW_SUPERUSER: 1
+        run: |
+          composer install --no-dev --no-interaction --prefer-dist --no-progress -vvv
+
+      # Clear caches (an toàn khi deploy)
+      - name: Clear caches
+        run: |
+          php artisan config:clear || true
+          php artisan route:clear || true
+          php artisan view:clear || true
+          php artisan cache:clear || true
 
       # Tạo folder deploy/ để upload lên public_html:
       # - Copy toàn bộ source trừ public/ vào deploy/
@@ -88,7 +143,7 @@ jobs:
         with:
           server: ${{ secrets.FTP_SERVER }}
           username: ${{ secrets.FTP_USERNAME }}
-          password: ${{ secrets.FTP_PASSWORD }} 
+          password: ${{ secrets.FTP_PASSWORD }}
 
           protocol: ftp
           port: 21
@@ -108,3 +163,4 @@ jobs:
             **/node_modules/**
             **/tests/**
             **/phpunit.xml
+            **/README*

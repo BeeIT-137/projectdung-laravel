@@ -6,6 +6,9 @@ on:
       - main
   workflow_dispatch:
 
+env:
+  LARAVEL_DIR: projectdung-laravel
+
 jobs:
   laravel-tests:
     runs-on: ubuntu-latest
@@ -13,6 +16,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Show repo structure (debug)
+        run: |
+          ls -la
+          echo "===== Laravel dir ====="
+          ls -la ${{ env.LARAVEL_DIR }}
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -23,47 +32,53 @@ jobs:
           ini-values: memory_limit=1G
 
       - name: Check PHP & Composer
+        working-directory: ${{ env.LARAVEL_DIR }}
         run: |
           php -v
-          php -m
           composer -V
           composer diagnose || true
 
       - name: Copy .env
+        working-directory: ${{ env.LARAVEL_DIR }}
         run: php -r "file_exists('.env') || copy('.env.example', '.env');"
 
-      # Cache composer để chạy nhanh hơn
       - name: Get Composer cache dir
         id: composer-cache
+        working-directory: ${{ env.LARAVEL_DIR }}
         run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
 
       - name: Cache Composer dependencies
         uses: actions/cache@v4
         with:
           path: ${{ steps.composer-cache.outputs.dir }}
-          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('projectdung-laravel/composer.lock') }}
           restore-keys: |
             ${{ runner.os }}-composer-
 
-      # BỎ -q để thấy lỗi thật, dùng -vvv để debug
       - name: Install Dependencies (DEBUG)
+        working-directory: ${{ env.LARAVEL_DIR }}
         env:
           COMPOSER_ALLOW_SUPERUSER: 1
         run: |
+          test -f composer.json
           composer install --no-interaction --prefer-dist --no-progress -vvv
 
       - name: Generate key
+        working-directory: ${{ env.LARAVEL_DIR }}
         run: php artisan key:generate
 
       - name: Directory Permissions
+        working-directory: ${{ env.LARAVEL_DIR }}
         run: chmod -R 777 storage bootstrap/cache
 
       - name: Create SQLite Database
+        working-directory: ${{ env.LARAVEL_DIR }}
         run: |
           mkdir -p database
           touch database/database.sqlite
 
       - name: Run Tests
+        working-directory: ${{ env.LARAVEL_DIR }}
         env:
           DB_CONNECTION: sqlite
           DB_DATABASE: database/database.sqlite
@@ -78,7 +93,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Nếu repo KHÔNG commit vendor/ thì cần composer install để có vendor trước khi deploy
       - name: Setup PHP (for deploy build)
         uses: shivammathur/setup-php@v2
         with:
@@ -87,56 +101,46 @@ jobs:
           extensions: mbstring, xml, ctype, json, bcmath, tokenizer, curl, zip, gd
           ini-values: memory_limit=1G
 
-      - name: Get Composer cache dir
-        id: composer-cache-deploy
-        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
-
-      - name: Cache Composer dependencies
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.composer-cache-deploy.outputs.dir }}
-          key: ${{ runner.os }}-composer-deploy-${{ hashFiles('**/composer.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-composer-deploy-
-            ${{ runner.os }}-composer-
-
       - name: Copy .env (for build only)
+        working-directory: ${{ env.LARAVEL_DIR }}
         run: php -r "file_exists('.env') || copy('.env.example', '.env');"
 
       - name: Install Dependencies (no-dev)
+        working-directory: ${{ env.LARAVEL_DIR }}
         env:
           COMPOSER_ALLOW_SUPERUSER: 1
-        run: |
-          composer install --no-dev --no-interaction --prefer-dist --no-progress -vvv
+        run: composer install --no-dev --no-interaction --prefer-dist --no-progress -vvv
 
-      # Clear caches (an toàn khi deploy)
       - name: Clear caches
+        working-directory: ${{ env.LARAVEL_DIR }}
         run: |
           php artisan config:clear || true
           php artisan route:clear || true
           php artisan view:clear || true
           php artisan cache:clear || true
 
-      # Tạo folder deploy/ để upload lên public_html:
-      # - Copy toàn bộ source trừ public/ vào deploy/
-      # - Copy NỘI DUNG public/ đè lên deploy/ (để index.php, .htaccess, assets nằm ở root)
-      - name: Prepare deploy folder (merge public/ to root)
+      # ===== BUILD DEPLOY FOLDER (public_html = root) =====
+      - name: Prepare deploy folder (merge public to root)
         run: |
           rm -rf deploy
           mkdir -p deploy
 
-          rsync -a --delete \
+          # copy toàn bộ source Laravel
+          rsync -a \
             --exclude ".git/" \
             --exclude ".github/" \
-            --exclude "public/" \
             --exclude ".env" \
             --exclude ".env.*" \
             --exclude "node_modules/" \
             --exclude "tests/" \
             --exclude "storage/logs/" \
-            ./ deploy/
+            "${{ env.LARAVEL_DIR }}/" deploy/
 
-          rsync -a public/ deploy/
+          # bỏ thư mục public/
+          rm -rf deploy/public
+
+          # copy nội dung public/ ra root deploy (index.php, .htaccess, assets)
+          rsync -a "${{ env.LARAVEL_DIR }}/public/" deploy/
 
       - name: FTP Deploy to Host
         uses: SamKirkland/FTP-Deploy-Action@v4.3.4
@@ -153,10 +157,7 @@ jobs:
 
           exclude: |
             **/.git*
-            **/.git*/**
             **/.github/**
-            **/.vscode/**
-            **/.idea/**
             **/.DS_Store
             **/.env
             **/.env.*
